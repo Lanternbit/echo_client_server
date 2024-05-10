@@ -1,6 +1,14 @@
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <thread>
+#include <mutex>
+#include <vector>
+#include <algorithm>
+
+std::vector<int> client_sockets;
+std::mutex mtx;
 
 void myerror(const char* msg) { fprintf(stderr, "%s %s %d\n", msg, strerror(errno), errno);}
 
@@ -13,60 +21,140 @@ struct Param {
     bool echo{false};
     bool broad{false};
     uint16_t port{0};
-    uint32_t srcIp{0};
+    uint32_t srcIp{INADDR_ANY};
 
     bool parse(int argc, char* argv[]) {
+        bool lastArgEcho = false;
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "-e") == 0) {
                 echo = true;
-                if (strcmp(argv[i], "-b") == 0) broad = true;
+                lastArgEcho = true;
+                continue;
+            } else if (strcmp(argv[i], "-b") == 0 && lastArgEcho) {
+                broad = true;
                 continue;
             }
 
-            int res = inet_pton(AF_INET, argv[i], &srcIp);
-            switch (res) {
-            case 1: break;
-            case 0: fprintf(stderr, "not a valid network address\n"); return false;
-            case -1: myerror("inet_pton"); return false;
-            }
+            port = atoi(argv[i]);
         }
 
         return port != 0;
     }
 } param;
 
-void recvThread(int sd) {
-    print("connected\n");
+void broadcastMessage(const char* message, size_t len) {
+    std::lock_guard<std::mutex> lock(mtx);
+    for (int clientSock : client_sockets) {
+        ssize_t res = ::send(clientSock, message, len, 0);
+
+        if (res == 0 || res == -1) {
+            fprintf(stderr, "send return %ld", res);
+            myerror("broadcast send");
+            break;
+        }
+    }
+}
+
+void recvThread(int clientSock) {
+    printf("connected\n");
     fflush(stdout); // flush stream
     static const int BUFSIZE = 65536;
     char buf[BUFSIZE];
+
+    // Register client
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        client_sockets.push_back(clientSock);
+    }
+
     while (true) {
-        ssize_t res = ::recv(sd, buf, BUFSIZE - 1, 0);
+        ssize_t res = ::recv(clientSock, buf, BUFSIZE - 1, 0);
         if (res == 0 || res == -1) {
-            fprinf(stderr, "recv return %ld", res);
-            myerror(" ");
+            fprintf(stderr, "recv return %ld", res);
+            myerror("recv");
             break;
         }
-        buf[res] = "\0";
-        prinf("%s", buf);
+        buf[res] = '\0';
+        printf("%s\n", buf);
         fflush(stdout);
 
         // echo
         if (param.echo) {
             // broadcast
             if (param.broad) {
-                res = ::send(sd, buf, res, 0);
-            }
+                broadcastMessage(buf, res);
+            } else {
+                res = ::send(clientSock, buf, res, 0);
 
-            res = ::send(sd, buf, res, 0);
-            if (res == 0 || res == -1) {
-                fprinf(stderr, "send return %ld", res);
-                myerror(" ");
-                break;
+                if (res == 0 || res == -1) {
+                    fprintf(stderr, "send return %ld", res);
+                    myerror("send");
+                    break;
+                }
             }
         }
     }
-    prinf("disconnected\n");
+    printf("disconnected\n");
     fflush(stdout);
-    ::close(sd);
+    ::close(clientSock);
+
+    // Remove client
+    std::lock_guard<std::mutex> lock(mtx);
+    client_sockets.erase(std::remove(client_sockets.begin(), client_sockets.end(), clientSock), client_sockets.end());
+}
+
+int main (int argc, char* argv[]) {
+    if (!param.parse(argc, argv)) {
+        usage();
+        return -1;
+    }
+
+    int clientSocket = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (clientSocket == -1) {
+        myerror("socket");
+        return -1;
+    }
+
+    {
+        int optval = 1;
+        int res = ::setsockopt(clientSocket, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+        if (res == -1) {
+            myerror("setsockopt");
+            return -1;
+        }
+    }
+
+    {
+        struct sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = param.srcIp;
+        addr.sin_port = htons(param.port);
+
+        ssize_t res = ::bind(clientSocket, (struct sockaddr*)&addr, sizeof(addr));
+        if (res == -1) {
+            myerror("bind");
+            return -1;
+        }
+    }
+
+    {
+        int res = listen(clientSocket, 5);
+        if (res == -1) {
+            myerror("listen");
+            return -1;
+        }
+    }
+
+    while (true) {
+        struct sockaddr_in addr;
+        socklen_t len = sizeof(addr);
+        int new_clientSocket = ::accept(clientSocket, (struct sockaddr*)&addr, &len);
+        if (new_clientSocket == -1) {
+            myerror("accept");
+            break;
+        }
+        std::thread* t = new std::thread(recvThread, new_clientSocket);
+        t->detach();
+    }
+    ::close(clientSocket);
 }
