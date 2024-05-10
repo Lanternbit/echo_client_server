@@ -21,7 +21,6 @@ struct Param {
     bool echo{false};
     bool broad{false};
     uint16_t port{0};
-    uint32_t srcIp{INADDR_ANY};
 
     bool parse(int argc, char* argv[]) {
         bool lastArgEcho = false;
@@ -70,12 +69,12 @@ void recvThread(int clientSock) {
     while (true) {
         ssize_t res = ::recv(clientSock, buf, BUFSIZE - 1, 0);
         if (res == 0 || res == -1) {
-            fprintf(stderr, "recv return %ld", res);
+            fprintf(stderr, "recv return %ld\n", res);
             myerror("recv");
             break;
         }
         buf[res] = '\0';
-        printf("%s\n", buf);
+        printf("%s", buf);
         fflush(stdout);
 
         // echo
@@ -109,15 +108,15 @@ int main (int argc, char* argv[]) {
         return -1;
     }
 
-    int clientSocket = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (clientSocket == -1) {
+    int cs = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (cs == -1) {
         myerror("socket");
         return -1;
     }
 
     {
         int optval = 1;
-        int res = ::setsockopt(clientSocket, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+        int res = ::setsockopt(cs, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
         if (res == -1) {
             myerror("setsockopt");
             return -1;
@@ -127,10 +126,9 @@ int main (int argc, char* argv[]) {
     {
         struct sockaddr_in addr;
         addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = param.srcIp;
         addr.sin_port = htons(param.port);
 
-        ssize_t res = ::bind(clientSocket, (struct sockaddr*)&addr, sizeof(addr));
+        ssize_t res = ::bind(cs, (struct sockaddr*)&addr, sizeof(addr));
         if (res == -1) {
             myerror("bind");
             return -1;
@@ -138,7 +136,7 @@ int main (int argc, char* argv[]) {
     }
 
     {
-        int res = listen(clientSocket, 5);
+        int res = listen(cs, 5);
         if (res == -1) {
             myerror("listen");
             return -1;
@@ -148,13 +146,13 @@ int main (int argc, char* argv[]) {
     while (true) {
         struct sockaddr_in addr;
         socklen_t len = sizeof(addr);
-        int new_clientSocket = ::accept(clientSocket, (struct sockaddr*)&addr, &len);
-        if (new_clientSocket == -1) {
+        int new_cs = ::accept(cs, (struct sockaddr*)&addr, &len);
+        if (new_cs == -1) {
             myerror("accept");
             break;
         }
-        std::thread* t = new std::thread(recvThread, new_clientSocket);
+        std::thread* t = new std::thread(recvThread, new_cs);
         t->detach();
     }
-    ::close(clientSocket);
+    ::close(cs);
 }
